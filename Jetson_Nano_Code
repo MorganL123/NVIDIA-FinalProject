@@ -1,0 +1,90 @@
+scp -r <downloaded_data> </home/workspace>
+python3 data2kitti.py --kaggle-dataset-path <kaggle dataset absolute directory path> \
+                         --mafa-dataset-path <mafa dataset absolute  directory path> \
+                         --fddb-dataset-path < FDDB dataset absolute  directory path> \
+                         --widerface-dataset-path <widerface dataset absolute  directory path> \
+                         --kitti-base-path < Out directory for storing KITTI formatted annotations > \
+                         --category-limit < Category Limit for Masked and No-Mask Faces > \
+                         --tlt-input-dims_width < tlt input width > \
+                         --tlt-input-dims_height <tlt input height > \
+                         --train < for generating training dataset >
+!python3 /workspace/face-mask-detection/data2kitti.py --kaggle-dataset-path $KAGGLE_DATASET_PATH \
+                         --mafa-dataset-path $MAFA_DATASET_PATH \
+                         --fddb-dataset-path $FDDB_DATASET_PATH \
+                         --widerface-dataset-path $WIDERFACE_DATASET_PATH \
+                         --kitti-base-path $KITTI_BASE_PATH \
+                         --category-limit $CATEGORY_LIMIT \
+                         --tlt-input-dims_width $TLT_INPUT_DIMS_WIDTH\
+                         --tlt-input-dims_height $TLT_INPUT_DIMS_HEIGHT \
+                         --train
+!mkdir detectnet_v2
+!mkdir $SPECS_DIR
+!mv face-mask-detection/tlt_specs/* $SPECS_DIR
+!ls $SPECS_DIR
+
+%env KITTI_CONFIG=kitti_config {\
+  root_directory_path: "/workspace/converted_datasets/train/"\
+  image_dir_name: "images"\
+  label_dir_name: "labels"\
+  image_extension: ".jpg"\
+  partition_mode: "random"\
+  num_partitions: 2\
+  val_split: 20\
+  num_shards: 10 }
+  
+  
+!tlt-dataset-convert -d $SPECS_DIR/detectnet_v2_tfrecords_kitti_trainval.txt \
+                     -o $DATA_DOWNLOAD_DIR/tfrecords/kitti_trainval/
+                     
+!ngc registry model list nvidia/tlt_pretrained_detectnet_v2:*
+
+!mkdir -p $USER_EXPERIMENT_DIR/pretrained_resnet18/
+
+!ngc registry model download-version nvidia/tlt_pretrained_detectnet_v2:resnet18 \
+    --dest $USER_EXPERIMENT_DIR/pretrained_resnet18
+    
+!tlt-train detectnet_v2 -e $SPECS_DIR/detectnet_v2_train_resnet18_kitti.txt \
+                        -r $USER_EXPERIMENT_DIR/experiment_dir_unpruned \
+                        -k $KEY \
+                        -n resnet18_detector
+                        
+!tlt-train detectnet_v2 -e $SPECS_DIR/detectnet_v2_train_resnet18_kitti.txt \
+                        -r 
+$USER_EXPERIMENT_DIR/experiment_dir_unpruned \
+                        -k $KEY \
+                        -n resnet18_detector
+                        
+!tlt-prune -m $USER_EXPERIMENT_DIR/experiment_dir_unpruned/weights/resnet18_detector.tlt \
+           -o $USER_EXPERIMENT_DIR/experiment_dir_pruned/resnet18_nopool_bn_detectnet_v2_pruned.tlt \
+           -eq union \
+           -pth 0.8 \
+           -k $KEY
+
+# Retraining using the pruned model as pretrained weights
+
+!tlt-train detectnet_v2 -e $SPECS_DIR/detectnet_v2_retrain_resnet18_kitti.txt \
+                        -r $USER_EXPERIMENT_DIR/experiment_dir_retrain \
+                        -k $KEY \
+                        -n resnet18_detector_pruned
+                        
+!tlt-evaluate detectnet_v2 -e $SPECS_DIR/detectnet_v2_retrain_resnet18_kitti.txt \
+                           -m $USER_EXPERIMENT_DIR/experiment_dir_retrain/weights/resnet18_detector_pruned.tlt \
+                           -k $KEY
+
+!mkdir -p $USER_EXPERIMENT_DIR/experiment_dir_final_pruned
+
+# Removing a preexisting copy of the etlt if there is one.
+import os
+output_file=os.path.join(os.environ['USER_EXPERIMENT_DIR'],
+
+"experiment_dir_final/resnet18_detector_pruned.etlt")
+if os.path.exists(output_file):
+     os.system("rm {}".format(output_file))
+!tlt-export detectnet_v2 \
+     -m 
+$USER_EXPERIMENT_DIR/experiment_dir_retrain/weights/resnet18_detector_pruned.tlt \
+     -o 
+$USER_EXPERIMENT_DIR/experiment_dir_final_pruned/resnet18_detector_pruned.etlt \
+     -k $KEY
+     
+#Thank you to NVIDIA Develop "Building and Deploying a Face Mask Detection Application Using NGC Collections" by Akhil Docca and Chris Parsons
